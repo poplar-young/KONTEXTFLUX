@@ -11,9 +11,11 @@ import WebSocket from "npm:ws";
 
 // --- 環境變數讀取 ---
 const ENV_KONTEXTFLUX_TOKEN = Deno.env.get("KONTEXTFLUX_TOKEN");
+// 修改这里：移除Deno.exit调用，改为设置变量标记缺少token
+let isMissingToken = false;
 if (!ENV_KONTEXTFLUX_TOKEN) {
   console.error("Error: KONTEXTFLUX_TOKEN environment variable is not set.");
-  Deno.exit(1);
+  isMissingToken = true;
 }
 
 // --- 類型定義 ---
@@ -262,6 +264,13 @@ const router = new Router();
 // --- 認證中間件 ---
 app.use(async (ctx, next) => {
   try {
+    // 检查是否缺少token
+    if (isMissingToken) {
+      ctx.response.status = Status.ServiceUnavailable;
+      ctx.response.body = { error: "Server configuration error: KONTEXTFLUX_TOKEN environment variable is not set." };
+      return;
+    }
+
     const authHeader = ctx.request.headers.get("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
       ctx.response.status = Status.Unauthorized;
@@ -479,6 +488,10 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
 
 // --- 啟動服務 ---
 console.log("\n--- KontextFlux OpenAI API Adapter (Deno/Oak) ---");
+if (isMissingToken) {
+  console.log("⚠️ WARNING: KONTEXTFLUX_TOKEN environment variable is not set!");
+  console.log("The server will start but all API requests will fail.");
+}
 console.log("Server listening on http://localhost:8000");
 console.log("Endpoints:");
 console.log(" GET /v1/models");
