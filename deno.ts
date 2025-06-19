@@ -148,75 +148,107 @@ const COMMON_HEADERS = {
 async function getKontextFluxConfig() {
   const url = "https://api.kontextflux.com/client/common/getConfig";
   const payload = { token: null, referrer: "" };
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { 
-      ...COMMON_HEADERS, 
-      "Content-Type": "application/json",
-      "Accept-Encoding": "gzip, deflate, br, zstd",
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to get config, status: ${response.status}`);
+  
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { 
+        ...COMMON_HEADERS, 
+        "Content-Type": "application/json",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+      },
+      body: JSON.stringify(payload),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to get config, status: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    if (!data.data) {
+      throw new Error("Failed to retrieve config data.");
+    }
+    
+    console.log("Successfully retrieved KontextFlux config.");
+    return data.data;
+  } catch (error) {
+    console.error("Error getting KontextFlux config:", error.message);
+    throw error;
   }
-  const data = await response.json();
-  if (!data.data) {
-    throw new Error("Failed to retrieve config data.");
-  }
-  return data.data;
 }
 
 async function uploadFile(config: any, imageBytes: Uint8Array, filename: string = "image.png") {
   const url = "https://api.kontextflux.com/client/resource/uploadFile";
   const encryptor = new KontextFluxEncryptor(config);
   const xtx = await encryptor.getXtxHash({});
-  const formData = new FormData();
-  formData.append("file", new Blob([imageBytes], { type: "image/png" }), filename);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      ...COMMON_HEADERS,
-      "Accept-Encoding": "gzip, deflate, br, zstd",
-      "Authorization": config.token,
-      "xtx": xtx,
-    },
-    body: formData,
-  });
-  if (!response.ok) {
-    throw new Error(`File upload failed, status: ${response.status}`);
+  
+  try {
+    const formData = new FormData();
+    formData.append("file", new Blob([imageBytes], { type: "image/png" }), filename);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...COMMON_HEADERS,
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Authorization": config.token,
+        "xtx": xtx,
+      },
+      body: formData,
+    });
+    
+    if (!response.ok) {
+      throw new Error(`File upload failed, status: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    if (!data.data) {
+      throw new Error(`Upload file returned invalid data: ${JSON.stringify(data)}`);
+    }
+    
+    console.log(`File uploaded successfully with key: ${data.data.key}`);
+    return data.data;
+  } catch (error) {
+    console.error("Error uploading file:", error.message);
+    throw error;
   }
-  const data = await response.json();
-  if (!data.data) {
-    throw new Error(`Upload file returned invalid data: ${JSON.stringify(data)}`);
-  }
-  return data.data;
 }
 
 async function createDrawTask(config: any, prompt: string, keys: string[] = [], size = "auto") {
   const url = "https://api.kontextflux.com/client/styleAI/draw";
   const payload = { keys, prompt, size };
-  const encryptor = new KontextFluxEncryptor(config);
-  const xtx = await encryptor.getXtxHash(payload);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      ...COMMON_HEADERS,
-      "Content-Type": "application/json",
-      "Accept-Encoding": "gzip, deflate, br, zstd",
-      "Authorization": config.token,
-      "xtx": xtx,
-    },
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    throw new Error(`Create draw task failed, status: ${response.status}`);
+  
+  try {
+    const encryptor = new KontextFluxEncryptor(config);
+    const xtx = await encryptor.getXtxHash(payload);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        ...COMMON_HEADERS,
+        "Content-Type": "application/json",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Authorization": config.token,
+        "xtx": xtx,
+      },
+      body: JSON.stringify(payload),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Create draw task failed, status: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    if (!data || !data.data || !data.data.id) {
+      throw new Error(`Create draw task returned invalid data: ${JSON.stringify(data)}`);
+    }
+    
+    console.log(`Draw task created with ID: ${data.data.id}`);
+    return data.data.id;
+  } catch (error) {
+    console.error("Error creating draw task:", error.message);
+    throw error;
   }
-  const data = await response.json();
-  if (!data || !data.data || !data.data.id) {
-    throw new Error(`Create draw task returned invalid data: ${JSON.stringify(data)}`);
-  }
-  return data.data.id;
 }
 
 async function processImageUrl(imageUrl: string): Promise<Uint8Array | null> {
@@ -229,10 +261,14 @@ async function processImageUrl(imageUrl: string): Promise<Uint8Array | null> {
         headers: { "User-Agent": COMMON_HEADERS["User-Agent"] },
         redirect: "follow",
       });
-      if (!response.ok) return null;
+      if (!response.ok) {
+        console.error(`Failed to fetch image from URL: ${imageUrl}, status: ${response.status}`);
+        return null;
+      }
       const buffer = await response.arrayBuffer();
       return new Uint8Array(buffer);
     }
+    console.error(`Unsupported image URL format: ${imageUrl.substring(0, 30)}...`);
     return null;
   } catch (error) {
     console.error(`Error processing image URL: ${error.message}`);
@@ -242,34 +278,46 @@ async function processImageUrl(imageUrl: string): Promise<Uint8Array | null> {
 
 // --- HMAC 函数 ---
 async function hmacSha256(message: string, key: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const keyData = encoder.encode(key);
-  const messageData = encoder.encode(message);
-  
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    keyData,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  
-  const signature = await crypto.subtle.sign("HMAC", cryptoKey, messageData);
-  return Array.from(new Uint8Array(signature))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
+  try {
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(key);
+    const messageData = encoder.encode(message);
+    
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      keyData,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    
+    const signature = await crypto.subtle.sign("HMAC", cryptoKey, messageData);
+    return Array.from(new Uint8Array(signature))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch (error) {
+    console.error(`HMAC generation error: ${error.message}`);
+    throw error;
+  }
 }
 
-// --- 去水印功能 ---
+// --- 去水印功能（改进版）---
 async function watermarkRemover(imageUrl: string): Promise<string> {
+  console.log(`Starting watermark removal for: ${imageUrl}`);
+  
   try {
     // 下载图片
-    const response = await fetch(imageUrl);
+    const response = await fetch(imageUrl, {
+      headers: { "User-Agent": COMMON_HEADERS["User-Agent"] }
+    });
+    
     if (!response.ok) {
-      console.error("Failed to download image for watermark removal");
+      console.error(`Failed to download image for watermark removal, status: ${response.status}`);
       return imageUrl;
     }
+    
     const imageBytes = await response.arrayBuffer();
+    console.log(`Successfully downloaded image (${imageBytes.byteLength} bytes)`);
     
     // 生成参数
     const pixbClId = Math.floor(Math.random() * 9000000000) + 1000000000;
@@ -279,6 +327,8 @@ async function watermarkRemover(imageUrl: string): Promise<string> {
     const n = "A4nzUYcDOZ";
     const t = `POST/service/public/transformation/v1.0/predictions/wm/remove${timestamp}${pixbClId}`;
     const xEbgSignature = await hmacSha256(t, n);
+    
+    console.log(`Generated signature for watermark removal request`);
     
     // 上传图片进行去水印
     const uploadUrl = "https://api.watermarkremover.io/service/public/transformation/v1.0/predictions/wm/remove";
@@ -303,40 +353,62 @@ async function watermarkRemover(imageUrl: string): Promise<string> {
     });
     
     if (!uploadResponse.ok) {
-      console.error("Watermark removal upload failed");
+      console.error(`Watermark removal upload failed, status: ${uploadResponse.status}`);
       return imageUrl;
     }
     
     const uploadResult = await uploadResponse.json();
     const resultId = uploadResult._id;
     
-    // 轮询结果
-    const resultUrl = `https://api.watermarkremover.io/service/public/transformation/v1.0/predictions/${resultId}`;
+    console.log(`Watermark removal task created with ID: ${resultId}`);
     
-    for (let i = 0; i < 30; i++) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const resultResponse = await fetch(resultUrl, {
-        headers: {
-          "User-Agent": COMMON_HEADERS["User-Agent"],
-          "Accept": "application/json, text/plain, */*",
-          "origin": "https://www.watermarkremover.io",
-          "referer": "https://www.watermarkremover.io/",
-        },
-      });
-      
-      if (resultResponse.ok) {
+    // 轮询结果，增加重试和超时机制
+    const resultUrl = `https://api.watermarkremover.io/service/public/transformation/v1.0/predictions/${resultId}`;
+    const maxAttempts = 30;
+    const pollingInterval = 1000; // 1秒
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        console.log(`Polling watermark removal result (attempt ${attempt + 1}/${maxAttempts})`);
+        
+        await new Promise(resolve => setTimeout(resolve, pollingInterval));
+        
+        const resultResponse = await fetch(resultUrl, {
+          headers: {
+            "User-Agent": COMMON_HEADERS["User-Agent"],
+            "Accept": "application/json, text/plain, */*",
+            "origin": "https://www.watermarkremover.io",
+            "referer": "https://www.watermarkremover.io/",
+          },
+        });
+        
+        if (!resultResponse.ok) {
+          console.error(`Error polling watermark removal result, status: ${resultResponse.status}`);
+          continue;
+        }
+        
         const result = await resultResponse.json();
+        console.log(`Watermark removal status: ${result.status}`);
+        
         if (result.status === "SUCCESS" && result.output?.[0]) {
+          console.log(`Watermark removal completed successfully`);
           return result.output[0];
         }
+        
+        if (result.status === "FAILED") {
+          console.error(`Watermark removal failed`);
+          return imageUrl;
+        }
+      } catch (error) {
+        console.error(`Error checking watermark removal status: ${error.message}`);
+        // 继续轮询，不中断循环
       }
     }
     
-    console.error("Watermark removal timeout");
+    console.error(`Watermark removal timed out after ${maxAttempts} attempts`);
     return imageUrl;
   } catch (error) {
-    console.error("Watermark removal error:", error);
+    console.error(`Watermark removal error: ${error.message}`);
     return imageUrl;
   }
 }
@@ -483,69 +555,82 @@ router.post("/v1/chat/completions", async (ctx) => {
     }
 
     // 获取配置
+    console.log("Getting KontextFlux configuration...");
     const config = await getKontextFluxConfig();
 
     // 处理图片上传
     const uploadedKeys: string[] = [];
     if (imageUrls.length > 0) {
+      console.log(`Processing ${imageUrls.length} images for upload...`);
       const uploadPromises = imageUrls.map(async (url, index) => {
         try {
           const imageBytes = await processImageUrl(url);
           if (imageBytes) {
+            console.log(`Uploading image ${index + 1}/${imageUrls.length}...`);
             const result = await uploadFile(config, imageBytes, `image_${index}.png`);
             return result.key;
           }
           return null;
         } catch (error) {
-          console.error("Image upload error:", error);
+          console.error(`Error uploading image ${index + 1}: ${error.message}`);
           return null;
         }
       });
       
       const results = await Promise.all(uploadPromises);
       uploadedKeys.push(...results.filter(key => key !== null));
+      console.log(`Successfully uploaded ${uploadedKeys.length}/${imageUrls.length} images`);
     }
 
     // 创建绘图任务
+    console.log(`Creating drawing task with prompt: "${cleanedPrompt || "generate image"}"`);
     const drawId = await createDrawTask(config, cleanedPrompt || "generate image", uploadedKeys, finalSize);
 
     if (requestBody.stream) {
+      console.log(`Starting streaming response for draw task ${drawId}`);
       const stream = new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder();
           let isClosed = false;
           let ws: WebSocket | null = null;
           
+          const safeSend = (data: StreamResponse) => {
+            if (!isClosed) {
+              try {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+              } catch (e) {
+                console.error("Error enqueueing data:", e);
+              }
+            }
+          };
+          
+          const closeStream = () => {
+            if (!isClosed) {
+              isClosed = true;
+              try {
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                controller.close();
+              } catch (e) {
+                console.error("Error closing stream:", e);
+              }
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                try {
+                  ws.close();
+                } catch (e) {
+                  console.error("Error closing WebSocket:", e);
+                }
+              }
+            }
+          };
+          
           try {
+            console.log(`Connecting to WebSocket for task ${drawId}...`);
             ws = await connectToWebSocket(config, drawId);
+            console.log(`WebSocket connected for task ${drawId}`);
+            
             const streamId = `chatcmpl-${crypto.randomUUID()}`;
             const created = Math.floor(Date.now() / 1000);
             let currentProgress = 0;
-            
-            const safeSend = (data: StreamResponse) => {
-              if (!isClosed) {
-                try {
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-                } catch (e) {
-                  console.error("Error enqueueing data:", e);
-                }
-              }
-            };
-            
-            const closeStream = () => {
-              if (!isClosed) {
-                isClosed = true;
-                try {
-                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
-                  controller.close();
-                } catch (e) {
-                  console.error("Error closing stream:", e);
-                }
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                  ws.close();
-                }
-              }
-            };
             
             // 发送初始消息
             safeSend({
@@ -558,29 +643,52 @@ router.post("/v1/chat/completions", async (ctx) => {
               
               try {
                 const msg = JSON.parse(event.data as string);
+                console.log(`WebSocket message received for task ${drawId}: ${JSON.stringify(msg).substring(0, 100)}...`);
                 
                 if (msg.content?.photo) {
+                  console.log(`Photo URL received for task ${drawId}`);
                   const originalUrl = msg.content.photo.url;
                   
-                  // 尝试去水印
-                  const finalUrl = await watermarkRemover(originalUrl);
-                  
-                  safeSend({
-                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                    choices: [{ delta: { content: `![image](${finalUrl})` }, index: 0, finish_reason: null }]
-                  });
-                  
-                  safeSend({
-                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
-                  });
-                  
-                  closeStream();
+                  try {
+                    // 尝试去水印
+                    console.log(`Starting watermark removal for task ${drawId}`);
+                    const finalUrl = await watermarkRemover(originalUrl);
+                    console.log(`Watermark removal completed for task ${drawId}`);
+                    
+                    safeSend({
+                      id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                      choices: [{ delta: { content: `![image](${finalUrl})` }, index: 0, finish_reason: null }]
+                    });
+                    
+                    safeSend({
+                      id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
+                    });
+                    
+                    closeStream();
+                  } catch (watermarkError) {
+                    console.error(`Watermark removal failed: ${watermarkError.message}`);
+                    // 如果去水印失败，使用原始URL
+                    safeSend({
+                      id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                      choices: [{ delta: { content: `![image](${originalUrl})` }, index: 0, finish_reason: null }]
+                    });
+                    
+                    safeSend({
+                      id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
+                    });
+                    
+                    closeStream();
+                  }
                 } else if (msg.content?.progress !== undefined) {
                   const progress = msg.content.progress;
                   
+                  // 避免重复进度更新
                   if (currentProgress >= progress) return;
                   currentProgress = progress;
+                  
+                  console.log(`Progress update for task ${drawId}: ${progress}%`);
                   
                   const emoji = progress < 20 ? "🚀" : progress < 40 ? "⚙️" : progress < 60 ? "✨" : progress < 80 ? "🔍" : progress < 100 ? "🎨" : "✅";
                   const bar = "█".repeat(Math.floor(progress / 5)) + "░".repeat(20 - Math.floor(progress / 5));
@@ -592,21 +700,50 @@ router.post("/v1/chat/completions", async (ctx) => {
                   });
                 }
               } catch (e) {
-                console.error("Error processing WebSocket message:", e);
+                console.error(`Error processing WebSocket message for task ${drawId}: ${e.message}`);
               }
             };
             
-            ws.onclose = () => {
+            ws.onclose = (event) => {
+              console.log(`WebSocket closed for task ${drawId} with code ${event.code}`);
+              // 只有在没有收到图片URL时才视为异常关闭
+              if (currentProgress < 100 && !isClosed) {
+                console.warn(`WebSocket closed before completion for task ${drawId}`);
+                
+                // 发送错误信息并关闭流
+                safeSend({
+                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                  choices: [{ delta: { content: "生成过程中断，请重试。" }, index: 0, finish_reason: 'stop' }]
+                });
+              }
               closeStream();
             };
             
             ws.onerror = (err) => {
-              console.error("WebSocket error:", err);
-              closeStream();
+              console.error(`WebSocket error for task ${drawId}:`, err);
+              if (!isClosed) {
+                safeSend({
+                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                  choices: [{ delta: { content: "生成过程发生错误，请重试。" }, index: 0, finish_reason: 'stop' }]
+                });
+                closeStream();
+              }
             };
             
+            // 添加安全保障：如果120秒后仍未完成，强制关闭
+            setTimeout(() => {
+              if (!isClosed) {
+                console.warn(`Task ${drawId} timed out after 120 seconds`);
+                safeSend({
+                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                  choices: [{ delta: { content: "生成超时，请重试。" }, index: 0, finish_reason: 'stop' }]
+                });
+                closeStream();
+              }
+            }, 120000);
+            
           } catch (streamError) {
-            console.error("Stream error:", streamError);
+            console.error(`Stream initialization error for task ${drawId}:`, streamError);
             if (!isClosed) {
               isClosed = true;
               controller.error(streamError);
@@ -621,21 +758,29 @@ router.post("/v1/chat/completions", async (ctx) => {
       ctx.response.headers.set("Connection", "keep-alive");
       ctx.response.headers.set("X-Accel-Buffering", "no");
     } else {
-      const originalUrl = await waitForCompletion(config, drawId);
-      const finalUrl = await watermarkRemover(originalUrl);
-      
-      ctx.response.body = {
-        id: `chatcmpl-${crypto.randomUUID()}`,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: requestBody.model,
-        choices: [{
-          message: { role: "assistant", content: `![image](${finalUrl})` },
-          index: 0,
-          finish_reason: "stop"
-        }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      };
+      console.log(`Starting non-streaming response for draw task ${drawId}`);
+      try {
+        const originalUrl = await waitForCompletion(config, drawId);
+        console.log(`Non-streaming task ${drawId} completed, removing watermark...`);
+        const finalUrl = await watermarkRemover(originalUrl);
+        
+        ctx.response.body = {
+          id: `chatcmpl-${crypto.randomUUID()}`,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: requestBody.model,
+          choices: [{
+            message: { role: "assistant", content: `![image](${finalUrl})` },
+            index: 0,
+            finish_reason: "stop"
+          }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+        };
+      } catch (error) {
+        console.error(`Error in non-streaming response for task ${drawId}:`, error);
+        ctx.response.status = Status.InternalServerError;
+        ctx.response.body = { error: `Error generating image: ${error.message}` };
+      }
     }
   } catch (e) {
     console.error("Chat completion error:", e);
@@ -655,29 +800,128 @@ async function connectToWebSocket(config: any, drawId: string): Promise<WebSocke
   const url = `wss://api.kontextflux.com/client/styleAI/checkWs?xtx=${xtx}`;
   
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    ws.onopen = () => {
-      ws.send(JSON.stringify(payload));
-      resolve(ws);
+    let connectionAttempt = 0;
+    const maxAttempts = 3;
+    const attemptConnection = () => {
+      connectionAttempt++;
+      console.log(`WebSocket connection attempt ${connectionAttempt}/${maxAttempts} for task ${drawId}`);
+      
+      const ws = new WebSocket(url);
+      
+      // 设置连接超时
+      const connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          console.error(`WebSocket connection timeout for task ${drawId}`);
+          ws.close();
+          if (connectionAttempt < maxAttempts) {
+            console.log(`Retrying WebSocket connection for task ${drawId}`);
+            attemptConnection();
+          } else {
+            reject(new Error(`WebSocket connection failed after ${maxAttempts} attempts`));
+          }
+        }
+      }, 10000); // 10秒连接超时
+      
+      ws.onopen = () => {
+        clearTimeout(connectionTimeout);
+        console.log(`WebSocket opened for task ${drawId}, sending payload`);
+        try {
+          ws.send(JSON.stringify(payload));
+          resolve(ws);
+        } catch (error) {
+          console.error(`Error sending initial payload for task ${drawId}:`, error);
+          ws.close();
+          reject(error);
+        }
+      };
+      
+      ws.onerror = (err) => {
+        clearTimeout(connectionTimeout);
+        console.error(`WebSocket connection error for task ${drawId}:`, err);
+        if (connectionAttempt < maxAttempts) {
+          console.log(`Retrying WebSocket connection for task ${drawId}`);
+          setTimeout(attemptConnection, 1000); // 1秒后重试
+        } else {
+          reject(new Error(`WebSocket connection failed after ${maxAttempts} attempts: ${err.message}`));
+        }
+      };
     };
-    ws.onerror = (err) => {
-      reject(new Error(`WebSocket connection failed: ${err.message}`));
-    };
+    
+    attemptConnection();
   });
 }
 
 async function waitForCompletion(config: any, drawId: string): Promise<string> {
-  const ws = await connectToWebSocket(config, drawId);
+  console.log(`Waiting for completion of task ${drawId} (non-streaming mode)`);
+  
   return new Promise((resolve, reject) => {
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data as string);
-      if (msg.content?.photo?.url) {
-        ws.close();
-        resolve(msg.content.photo.url);
+    let completed = false;
+    let connectionClosed = false;
+    
+    const connectAndListen = async () => {
+      try {
+        const ws = await connectToWebSocket(config, drawId);
+        
+        // 设置90秒超时
+        const timeout = setTimeout(() => {
+          if (!completed && !connectionClosed) {
+            console.error(`Task ${drawId} timed out after 90 seconds`);
+            try {
+              ws.close();
+            } catch (e) {
+              console.error(`Error closing WebSocket after timeout:`, e);
+            }
+            reject(new Error("Task timed out after 90 seconds"));
+          }
+        }, 90000);
+        
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data as string);
+            
+            if (msg.content?.photo?.url) {
+              completed = true;
+              clearTimeout(timeout);
+              const imageUrl = msg.content.photo.url;
+              console.log(`Task ${drawId} completed with image URL`);
+              ws.close();
+              resolve(imageUrl);
+            } else if (msg.content?.progress) {
+              console.log(`Task ${drawId} progress: ${msg.content.progress}%`);
+            }
+          } catch (error) {
+            console.error(`Error parsing WebSocket message for task ${drawId}:`, error);
+          }
+        };
+        
+        ws.onclose = () => {
+          connectionClosed = true;
+          if (!completed) {
+            console.warn(`WebSocket closed before completion for task ${drawId}`);
+            clearTimeout(timeout);
+            reject(new Error("WebSocket closed before completion"));
+          }
+        };
+        
+        ws.onerror = (err) => {
+          console.error(`WebSocket error for task ${drawId}:`, err);
+          if (!completed && !connectionClosed) {
+            clearTimeout(timeout);
+            try {
+              ws.close();
+            } catch (e) {
+              console.error(`Error closing WebSocket after error:`, e);
+            }
+            reject(new Error(`WebSocket error: ${err.message}`));
+          }
+        };
+      } catch (error) {
+        console.error(`Error in waitForCompletion for task ${drawId}:`, error);
+        reject(error);
       }
     };
-    ws.onerror = (err) => reject(new Error(`WebSocket error: ${err.message}`));
-    ws.onclose = () => reject(new Error("WebSocket closed before completion."));
+    
+    connectAndListen();
   });
 }
 
