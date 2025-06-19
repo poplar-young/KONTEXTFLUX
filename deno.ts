@@ -512,74 +512,105 @@ router.post("/v1/chat/completions", async (ctx) => {
     if (requestBody.stream) {
       const stream = new ReadableStream({
         async start(controller) {
+          const encoder = new TextEncoder();
+          let isClosed = false;
+          let ws: WebSocket | null = null;
+          
           try {
-            const ws = await connectToWebSocket(config, drawId);
+            ws = await connectToWebSocket(config, drawId);
             const streamId = `chatcmpl-${crypto.randomUUID()}`;
             const created = Math.floor(Date.now() / 1000);
             let currentProgress = 0;
             
-            const send = (data: StreamResponse) => {
-              controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
+            const safeSend = (data: StreamResponse) => {
+              if (!isClosed) {
+                try {
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+                } catch (e) {
+                  console.error("Error enqueueing data:", e);
+                }
+              }
+            };
+            
+            const closeStream = () => {
+              if (!isClosed) {
+                isClosed = true;
+                try {
+                  controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+                  controller.close();
+                } catch (e) {
+                  console.error("Error closing stream:", e);
+                }
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.close();
+                }
+              }
             };
             
             // 发送初始消息
-            send({
+            safeSend({
               id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
               choices: [{ delta: { role: 'assistant' }, index: 0, finish_reason: null }]
             });
             
             ws.onmessage = async (event) => {
-              const msg = JSON.parse(event.data as string);
+              if (isClosed) return;
               
-              if (msg.content?.photo) {
-                const originalUrl = msg.content.photo.url;
+              try {
+                const msg = JSON.parse(event.data as string);
                 
-                // 尝试去水印
-                const finalUrl = await watermarkRemover(originalUrl);
-                
-                send({
-                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                  choices: [{ delta: { content: `![image](${finalUrl})` }, index: 0, finish_reason: null }]
-                });
-                
-                send({
-                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                  choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
-                });
-                
-                controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-                ws.close();
-                controller.close();
-              } else if (msg.content?.progress !== undefined) {
-                const progress = msg.content.progress;
-                
-                if (currentProgress >= progress) return;
-                currentProgress = progress;
-                
-                const emoji = progress < 20 ? "🚀" : progress < 40 ? "⚙️" : progress < 60 ? "✨" : progress < 80 ? "🔍" : progress < 100 ? "🎨" : "✅";
-                const bar = "█".repeat(Math.floor(progress / 5)) + "░".repeat(20 - Math.floor(progress / 5));
-                const reasoningText = `${emoji} 图像生成进度 |${bar}| ${progress}%\n`;
-                
-                send({
-                  id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                  choices: [{ delta: { reasoning_content: reasoningText }, index: 0, finish_reason: null }]
-                });
+                if (msg.content?.photo) {
+                  const originalUrl = msg.content.photo.url;
+                  
+                  // 尝试去水印
+                  const finalUrl = await watermarkRemover(originalUrl);
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: { content: `![image](${finalUrl})` }, index: 0, finish_reason: null }]
+                  });
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
+                  });
+                  
+                  closeStream();
+                } else if (msg.content?.progress !== undefined) {
+                  const progress = msg.content.progress;
+                  
+                  if (currentProgress >= progress) return;
+                  currentProgress = progress;
+                  
+                  const emoji = progress < 20 ? "🚀" : progress < 40 ? "⚙️" : progress < 60 ? "✨" : progress < 80 ? "🔍" : progress < 100 ? "🎨" : "✅";
+                  const bar = "█".repeat(Math.floor(progress / 5)) + "░".repeat(20 - Math.floor(progress / 5));
+                  const reasoningText = `${emoji} 图像生成进度 |${bar}| ${progress}%\n`;
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: { reasoning_content: reasoningText }, index: 0, finish_reason: null }]
+                  });
+                }
+              } catch (e) {
+                console.error("Error processing WebSocket message:", e);
               }
             };
             
             ws.onclose = () => {
-              if (controller.desiredSize !== null) {
-                controller.close();
-              }
+              closeStream();
             };
             
             ws.onerror = (err) => {
               console.error("WebSocket error:", err);
-              controller.error(new Error("WebSocket connection failed"));
+              closeStream();
             };
+            
           } catch (streamError) {
             console.error("Stream error:", streamError);
-            controller.error(streamError);
+            if (!isClosed) {
+              isClosed = true;
+              controller.error(streamError);
+            }
           }
         }
       });
