@@ -593,6 +593,8 @@ router.post("/v1/chat/completions", async (ctx) => {
           const encoder = new TextEncoder();
           let isClosed = false;
           let ws: WebSocket | null = null;
+          let imageUrlReceived: string | null = null; // 用于跟踪是否已收到图像URL
+          let processingWatermark = false; // 用于跟踪是否正在处理水印移除
           
           const safeSend = (data: StreamResponse) => {
             if (!isClosed) {
@@ -649,11 +651,22 @@ router.post("/v1/chat/completions", async (ctx) => {
                   console.log(`Photo URL received for task ${drawId}`);
                   const originalUrl = msg.content.photo.url;
                   
+                  // 重要：保存URL，以便WebSocket关闭时仍能处理
+                  imageUrlReceived = originalUrl;
+                  
+                  // 标记正在处理水印移除
+                  processingWatermark = true;
+                  
                   try {
                     // 尝试去水印
                     console.log(`Starting watermark removal for task ${drawId}`);
                     const finalUrl = await watermarkRemover(originalUrl);
                     console.log(`Watermark removal completed for task ${drawId}`);
+                    
+                    // 如果流已关闭，则不再发送
+                    if (isClosed) return;
+                    
+                    processingWatermark = false;
                     
                     safeSend({
                       id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
@@ -668,6 +681,12 @@ router.post("/v1/chat/completions", async (ctx) => {
                     closeStream();
                   } catch (watermarkError) {
                     console.error(`Watermark removal failed: ${watermarkError.message}`);
+                    
+                    // 如果流已关闭，则不再发送
+                    if (isClosed) return;
+                    
+                    processingWatermark = false;
+                    
                     // 如果去水印失败，使用原始URL
                     safeSend({
                       id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
@@ -704,24 +723,66 @@ router.post("/v1/chat/completions", async (ctx) => {
               }
             };
             
-            ws.onclose = (event) => {
+            ws.onclose = async (event) => {
               console.log(`WebSocket closed for task ${drawId} with code ${event.code}`);
+              
+              // 关键修改：如果已经收到图像URL但还在处理水印移除，继续处理而不报错
+              if (imageUrlReceived && processingWatermark) {
+                console.log(`WebSocket closed but image URL was received and watermark removal is in progress. Continuing...`);
+                // 水印处理已在onmessage中启动，不需要再次启动
+                return;
+              }
+              
+              // 如果已收到图像URL但尚未开始处理水印，则在这里处理
+              if (imageUrlReceived && !processingWatermark && !isClosed) {
+                console.log(`WebSocket closed but image URL was received. Starting watermark removal.`);
+                try {
+                  const finalUrl = await watermarkRemover(imageUrlReceived);
+                  console.log(`Watermark removal completed after WebSocket closed for task ${drawId}`);
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: { content: `![image](${finalUrl})` }, index: 0, finish_reason: null }]
+                  });
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
+                  });
+                } catch (error) {
+                  console.error(`Error in watermark removal after WebSocket closed: ${error.message}`);
+                  // 失败时使用原始URL
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: { content: `![image](${imageUrlReceived})` }, index: 0, finish_reason: null }]
+                  });
+                  
+                  safeSend({
+                    id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
+                    choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
+                  });
+                }
+                closeStream();
+                return;
+              }
+              
               // 只有在没有收到图片URL时才视为异常关闭
-              if (currentProgress < 100 && !isClosed) {
-                console.warn(`WebSocket closed before completion for task ${drawId}`);
+              if (currentProgress < 100 && !isClosed && !imageUrlReceived) {
+                console.warn(`WebSocket closed before receiving image URL for task ${drawId}`);
                 
                 // 发送错误信息并关闭流
                 safeSend({
                   id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
                   choices: [{ delta: { content: "生成过程中断，请重试。" }, index: 0, finish_reason: 'stop' }]
                 });
+                closeStream();
               }
-              closeStream();
             };
             
             ws.onerror = (err) => {
               console.error(`WebSocket error for task ${drawId}:`, err);
-              if (!isClosed) {
+              // 如果已经收到图像URL，即使出错也不中断处理
+              if (!isClosed && !imageUrlReceived) {
                 safeSend({
                   id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
                   choices: [{ delta: { content: "生成过程发生错误，请重试。" }, index: 0, finish_reason: 'stop' }]
@@ -732,7 +793,7 @@ router.post("/v1/chat/completions", async (ctx) => {
             
             // 添加安全保障：如果120秒后仍未完成，强制关闭
             setTimeout(() => {
-              if (!isClosed) {
+              if (!isClosed && !imageUrlReceived) {
                 console.warn(`Task ${drawId} timed out after 120 seconds`);
                 safeSend({
                   id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
@@ -851,12 +912,14 @@ async function connectToWebSocket(config: any, drawId: string): Promise<WebSocke
   });
 }
 
+// 修改非流式响应的等待完成函数
 async function waitForCompletion(config: any, drawId: string): Promise<string> {
   console.log(`Waiting for completion of task ${drawId} (non-streaming mode)`);
   
   return new Promise((resolve, reject) => {
     let completed = false;
     let connectionClosed = false;
+    let imageUrlReceived: string | null = null;
     
     const connectAndListen = async () => {
       try {
@@ -871,7 +934,12 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
             } catch (e) {
               console.error(`Error closing WebSocket after timeout:`, e);
             }
-            reject(new Error("Task timed out after 90 seconds"));
+            // 如果有收到图像URL，即使超时也返回该URL
+            if (imageUrlReceived) {
+              resolve(imageUrlReceived);
+            } else {
+              reject(new Error("Task timed out after 90 seconds"));
+            }
           }
         }, 90000);
         
@@ -882,10 +950,10 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
             if (msg.content?.photo?.url) {
               completed = true;
               clearTimeout(timeout);
-              const imageUrl = msg.content.photo.url;
+              imageUrlReceived = msg.content.photo.url;
               console.log(`Task ${drawId} completed with image URL`);
               ws.close();
-              resolve(imageUrl);
+              resolve(imageUrlReceived);
             } else if (msg.content?.progress) {
               console.log(`Task ${drawId} progress: ${msg.content.progress}%`);
             }
@@ -896,16 +964,35 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
         
         ws.onclose = () => {
           connectionClosed = true;
-          if (!completed) {
+          clearTimeout(timeout);
+          
+          if (imageUrlReceived) {
+            // 如果已经收到图像URL，即使连接关闭也返回
+            if (!completed) {
+              console.log(`WebSocket closed but image URL was received for task ${drawId}`);
+              completed = true;
+              resolve(imageUrlReceived);
+            }
+          } else if (!completed) {
             console.warn(`WebSocket closed before completion for task ${drawId}`);
-            clearTimeout(timeout);
             reject(new Error("WebSocket closed before completion"));
           }
         };
         
         ws.onerror = (err) => {
           console.error(`WebSocket error for task ${drawId}:`, err);
-          if (!completed && !connectionClosed) {
+          
+          if (imageUrlReceived && !completed && !connectionClosed) {
+            // 如果已经收到图像URL，即使发生错误也返回
+            clearTimeout(timeout);
+            completed = true;
+            try {
+              ws.close();
+            } catch (e) {
+              console.error(`Error closing WebSocket after error:`, e);
+            }
+            resolve(imageUrlReceived);
+          } else if (!completed && !connectionClosed) {
             clearTimeout(timeout);
             try {
               ws.close();
@@ -917,7 +1004,12 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
         };
       } catch (error) {
         console.error(`Error in waitForCompletion for task ${drawId}:`, error);
-        reject(error);
+        // 如果有收到图像URL，即使出错也返回
+        if (imageUrlReceived) {
+          resolve(imageUrlReceived);
+        } else {
+          reject(error);
+        }
       }
     };
     
@@ -941,3 +1033,4 @@ console.log(" Example: curl -H \"Authorization: Bearer YOUR_CLIENT_API_KEY\" ...
 console.log("-------------------------------------------------");
 
 await app.listen({ port });
+
