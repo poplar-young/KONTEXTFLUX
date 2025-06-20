@@ -10,6 +10,18 @@ import { encodeBase64 as encode, decodeBase64 as decode } from "https://deno.lan
 import WebSocket from "npm:ws";
 import { createHash } from "https://deno.land/std@0.217.0/crypto/mod.ts";
 
+// --- 超时配置 ---
+const TIMEOUT_CONFIG = {
+  WEBSOCKET_CONNECTION: parseInt(Deno.env.get("WEBSOCKET_TIMEOUT") || "15000"),     // WebSocket连接超时：15秒
+  STREAMING_RESPONSE: parseInt(Deno.env.get("STREAMING_TIMEOUT") || "300000"),      // 流式响应超时：5分钟
+  NON_STREAMING_RESPONSE: parseInt(Deno.env.get("NON_STREAMING_TIMEOUT") || "240000"), // 非流式响应超时：4分钟
+  WATERMARK_REMOVAL: parseInt(Deno.env.get("WATERMARK_TIMEOUT") || "60000"),        // 去水印处理超时：1分钟
+  WATERMARK_POLLING_ATTEMPTS: parseInt(Deno.env.get("WATERMARK_ATTEMPTS") || "60"), // 去水印轮询次数：60次
+  WATERMARK_POLLING_INTERVAL: parseInt(Deno.env.get("WATERMARK_INTERVAL") || "1000") // 去水印轮询间隔：1秒
+};
+
+console.log("Timeout configuration:", TIMEOUT_CONFIG);
+
 // --- 环境变量读取 ---
 const ENV_CLIENT_API_KEYS = Deno.env.get("CLIENT_API_KEYS");
 let VALID_CLIENT_KEYS: Set<string> = new Set();
@@ -364,49 +376,65 @@ async function watermarkRemover(imageUrl: string): Promise<string> {
     
     // 轮询结果，增加重试和超时机制
     const resultUrl = `https://api.watermarkremover.io/service/public/transformation/v1.0/predictions/${resultId}`;
-    const maxAttempts = 30;
-    const pollingInterval = 1000; // 1秒
+    const maxAttempts = TIMEOUT_CONFIG.WATERMARK_POLLING_ATTEMPTS;
+    const pollingInterval = TIMEOUT_CONFIG.WATERMARK_POLLING_INTERVAL;
     
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        console.log(`Polling watermark removal result (attempt ${attempt + 1}/${maxAttempts})`);
-        
-        await new Promise(resolve => setTimeout(resolve, pollingInterval));
-        
-        const resultResponse = await fetch(resultUrl, {
-          headers: {
-            "User-Agent": COMMON_HEADERS["User-Agent"],
-            "Accept": "application/json, text/plain, */*",
-            "origin": "https://www.watermarkremover.io",
-            "referer": "https://www.watermarkremover.io/",
-          },
-        });
-        
-        if (!resultResponse.ok) {
-          console.error(`Error polling watermark removal result, status: ${resultResponse.status}`);
-          continue;
+    // 添加总体超时控制
+    const watermarkTimeoutPromise = new Promise<string>((resolve) => {
+      setTimeout(() => {
+        console.error(`Watermark removal timed out after ${TIMEOUT_CONFIG.WATERMARK_REMOVAL / 1000} seconds`);
+        resolve(imageUrl); // 超时返回原图
+      }, TIMEOUT_CONFIG.WATERMARK_REMOVAL);
+    });
+    
+    const pollingPromise = new Promise<string>(async (resolve) => {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+          console.log(`Polling watermark removal result (attempt ${attempt + 1}/${maxAttempts})`);
+          
+          await new Promise(resolve => setTimeout(resolve, pollingInterval));
+          
+          const resultResponse = await fetch(resultUrl, {
+            headers: {
+              "User-Agent": COMMON_HEADERS["User-Agent"],
+              "Accept": "application/json, text/plain, */*",
+              "origin": "https://www.watermarkremover.io",
+              "referer": "https://www.watermarkremover.io/",
+            },
+          });
+          
+          if (!resultResponse.ok) {
+            console.error(`Error polling watermark removal result, status: ${resultResponse.status}`);
+            continue;
+          }
+          
+          const result = await resultResponse.json();
+          console.log(`Watermark removal status: ${result.status}`);
+          
+          if (result.status === "SUCCESS" && result.output?.[0]) {
+            console.log(`Watermark removal completed successfully`);
+            resolve(result.output[0]);
+            return;
+          }
+          
+          if (result.status === "FAILED") {
+            console.error(`Watermark removal failed`);
+            resolve(imageUrl);
+            return;
+          }
+        } catch (error) {
+          console.error(`Error checking watermark removal status: ${error.message}`);
+          // 继续轮询，不中断循环
         }
-        
-        const result = await resultResponse.json();
-        console.log(`Watermark removal status: ${result.status}`);
-        
-        if (result.status === "SUCCESS" && result.output?.[0]) {
-          console.log(`Watermark removal completed successfully`);
-          return result.output[0];
-        }
-        
-        if (result.status === "FAILED") {
-          console.error(`Watermark removal failed`);
-          return imageUrl;
-        }
-      } catch (error) {
-        console.error(`Error checking watermark removal status: ${error.message}`);
-        // 继续轮询，不中断循环
       }
-    }
+      
+      console.error(`Watermark removal timed out after ${maxAttempts} attempts`);
+      resolve(imageUrl);
+    });
     
-    console.error(`Watermark removal timed out after ${maxAttempts} attempts`);
-    return imageUrl;
+    // 使用Promise.race来实现超时控制
+    return await Promise.race([pollingPromise, watermarkTimeoutPromise]);
+    
   } catch (error) {
     console.error(`Watermark removal error: ${error.message}`);
     return imageUrl;
@@ -490,6 +518,7 @@ router.get("/health", (ctx) => {
     status: "ok",
     timestamp: new Date().toISOString(),
     clientKeysConfigured: VALID_CLIENT_KEYS.size > 0,
+    timeoutConfig: TIMEOUT_CONFIG,
   };
 });
 
@@ -715,7 +744,7 @@ router.post("/v1/chat/completions", async (ctx) => {
                   
                   safeSend({
                     id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
-                    choices: [{ delta: { reasoning_content: reasoningText }, index: 0, finish_reason: null }]
+                    choices: [{ delta: {reasoning_content: reasoningText }, index: 0, finish_reason: null }]
                   });
                 }
               } catch (e) {
@@ -791,17 +820,17 @@ router.post("/v1/chat/completions", async (ctx) => {
               }
             };
             
-            // 添加安全保障：如果120秒后仍未完成，强制关闭
+            // 添加安全保障：如果超时后仍未完成，强制关闭
             setTimeout(() => {
               if (!isClosed && !imageUrlReceived) {
-                console.warn(`Task ${drawId} timed out after 120 seconds`);
+                console.warn(`Task ${drawId} timed out after ${TIMEOUT_CONFIG.STREAMING_RESPONSE / 1000} seconds`);
                 safeSend({
                   id: streamId, created, model: requestBody.model, object: "chat.completion.chunk",
                   choices: [{ delta: { content: "生成超时，请重试。" }, index: 0, finish_reason: 'stop' }]
                 });
                 closeStream();
               }
-            }, 120000);
+            }, TIMEOUT_CONFIG.STREAMING_RESPONSE);
             
           } catch (streamError) {
             console.error(`Stream initialization error for task ${drawId}:`, streamError);
@@ -881,7 +910,7 @@ async function connectToWebSocket(config: any, drawId: string): Promise<WebSocke
             reject(new Error(`WebSocket connection failed after ${maxAttempts} attempts`));
           }
         }
-      }, 10000); // 10秒连接超时
+      }, TIMEOUT_CONFIG.WEBSOCKET_CONNECTION);
       
       ws.onopen = () => {
         clearTimeout(connectionTimeout);
@@ -925,10 +954,10 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
       try {
         const ws = await connectToWebSocket(config, drawId);
         
-        // 设置90秒超时
+        // 设置超时时间
         const timeout = setTimeout(() => {
           if (!completed && !connectionClosed) {
-            console.error(`Task ${drawId} timed out after 90 seconds`);
+            console.error(`Task ${drawId} timed out after ${TIMEOUT_CONFIG.NON_STREAMING_RESPONSE / 1000} seconds`);
             try {
               ws.close();
             } catch (e) {
@@ -938,10 +967,10 @@ async function waitForCompletion(config: any, drawId: string): Promise<string> {
             if (imageUrlReceived) {
               resolve(imageUrlReceived);
             } else {
-              reject(new Error("Task timed out after 90 seconds"));
+              reject(new Error(`Task timed out after ${TIMEOUT_CONFIG.NON_STREAMING_RESPONSE / 1000} seconds`));
             }
           }
-        }, 90000);
+        }, TIMEOUT_CONFIG.NON_STREAMING_RESPONSE);
         
         ws.onmessage = (event) => {
           try {
@@ -1023,6 +1052,12 @@ const port = parseInt(Deno.env.get("PORT") || "8000");
 console.log("\n--- KontextFlux OpenAI API Adapter (Deno/Oak) ---");
 console.log(`Server listening on port ${port}`);
 console.log(`Client API Keys loaded: ${VALID_CLIENT_KEYS.size}`);
+console.log("Timeout Configuration:");
+console.log(`  WebSocket Connection: ${TIMEOUT_CONFIG.WEBSOCKET_CONNECTION / 1000}s`);
+console.log(`  Streaming Response: ${TIMEOUT_CONFIG.STREAMING_RESPONSE / 1000}s`);
+console.log(`  Non-Streaming Response: ${TIMEOUT_CONFIG.NON_STREAMING_RESPONSE / 1000}s`);
+console.log(`  Watermark Removal: ${TIMEOUT_CONFIG.WATERMARK_REMOVAL / 1000}s`);
+console.log(`  Watermark Polling: ${TIMEOUT_CONFIG.WATERMARK_POLLING_ATTEMPTS} attempts × ${TIMEOUT_CONFIG.WATERMARK_POLLING_INTERVAL / 1000}s`);
 console.log("\nEndpoints:");
 console.log(" GET  /health");
 console.log(" GET  /v1/models");
@@ -1030,6 +1065,13 @@ console.log(" POST /v1/chat/completions");
 console.log("\nAuthentication:");
 console.log(" Provide your client API key in the Authorization header.");
 console.log(" Example: curl -H \"Authorization: Bearer YOUR_CLIENT_API_KEY\" ...");
+console.log("\nEnvironment Variables (Optional):");
+console.log(" WEBSOCKET_TIMEOUT - WebSocket connection timeout in ms (default: 15000)");
+console.log(" STREAMING_TIMEOUT - Streaming response timeout in ms (default: 300000)");
+console.log(" NON_STREAMING_TIMEOUT - Non-streaming response timeout in ms (default: 240000)");
+console.log(" WATERMARK_TIMEOUT - Watermark removal timeout in ms (default: 60000)");
+console.log(" WATERMARK_ATTEMPTS - Watermark polling attempts (default: 60)");
+console.log(" WATERMARK_INTERVAL - Watermark polling interval in ms (default: 1000)");
 console.log("-------------------------------------------------");
 
 await app.listen({ port });
